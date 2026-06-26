@@ -86,14 +86,29 @@ if st.button("🚀 GENERUJ GOTOWY RAPORT PDF"):
                         images_for_ai.append(base64.b64encode(f.read()).decode('utf-8'))
                 
                 # 2. Analiza przez OpenAI GPT-4o
-                prompt = """Analizujesz zdjęcia z wizyty w mieszkaniu. 
-                Wypisz w formie JSON dane do protokołu: 
-                - data (dzisiejsza),
-                - wyposażenie (lista mebli),
-                - stan_licznik_energia,
-                - uwagi_techniczne,
-                - klucze (opis).
-                Zwróć tylko czysty JSON."""
+                prompt = """# 2. Analiza przez OpenAI GPT-4o
+                prompt = """Jesteś inteligentnym asystentem biura nieruchomości. 
+                Przeanalizuj zdjęcia i wypisz dane do protokołu w formacie JSON.
+                Wymagane klucze w JSON: 
+                - "data": "data wizyty",
+                - "wyposażenie": "lista mebli i sprzętów",
+                - "stan_licznik_energia": "sama liczba",
+                - "uwagi_techniczne": "krótki opis usterek lub brak",
+                - "klucze": "opis przekazanych kluczy".
+                Ważne: Zwróć WYŁĄCZNIE czysty obiekt JSON, bez żadnych wstępów."""
+
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": [
+                        {"type": "text", "text": prompt},
+                        *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}} for img in images_for_ai[:10]]
+                    ]}],
+                    response_format={ "type": "json_object" } # <--- TO WYMUSZA POPRAWNY FORMAT
+                )
+                
+                # Bezpieczne wczytywanie
+                raw_content = response.choices[0].message.content
+                data = json.loads(raw_content)."""
 
                 response = client.chat.completions.create(
                     model="gpt-4o",
