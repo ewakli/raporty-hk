@@ -6,7 +6,7 @@ import io, json, base64, re
 from streamlit_drawable_canvas import st_canvas
 from PIL import Image
 
-st.set_page_config(page_title="HK Pro v7 - Fixed Signatures", layout="wide")
+st.set_page_config(page_title="HK Pro v8 - Total Signature Fix", layout="wide")
 
 # --- 1. KONFIGURACJA ---
 if "OPENAI_API_KEY" in st.secrets:
@@ -18,19 +18,26 @@ else:
 if 'step' not in st.session_state: st.session_state.step = 1
 if 'data' not in st.session_state: st.session_state.data = {}
 
-# --- 2. FUNKCJE TECHNICZNE ---
-def resize_image(image_file):
-    img = Image.open(image_file)
-    if img.mode != "RGB": img = img.convert("RGB")
-    img.thumbnail((1200, 1200))
-    buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=85)
-    return base64.b64encode(buffer.getvalue()).decode('utf-8')
+# --- 2. FUNKCJE NAPRAWCZE DLA WORD ---
+def merge_broken_tags(paragraphs):
+    """Naprawia tagi {{...}}, które Word rozbił na części w kodzie XML"""
+    for p in paragraphs:
+        full_text = "".join(run.text for run in p.runs)
+        if "{{" in full_text and "}}" in full_text:
+            # Czyścimy wszystkie runy i wstawiamy scalony tekst do pierwszego
+            for run in p.runs:
+                run.text = ""
+            p.runs[0].text = full_text
 
 def get_tags(docx_bytes):
     doc = Document(io.BytesIO(docx_bytes))
+    merge_broken_tags(doc.paragraphs)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                merge_broken_tags(cell.paragraphs)
+    
     full_text = ""
-    # Czytamy wszystko (akapity i tabele)
     for p in doc.paragraphs: full_text += p.text + " "
     for t in doc.tables:
         for r in t.rows:
@@ -39,50 +46,49 @@ def get_tags(docx_bytes):
     found = re.findall(r"\{\{(.*?)\}\}", full_text)
     cleaned = [t.strip() for t in found if t.strip()]
     
-    # Rozdzielamy: wszystko co ma "podpis" idzie do sekcji podpisów
     text_tags = [t for t in set(cleaned) if 'podpis' not in t.lower()]
     sig_tags = [t for t in set(cleaned) if 'podpis' in t.lower()]
     return text_tags, sig_tags
 
 def apply_final_changes(doc, text_map, sig_map):
-    """Pancerna metoda podmiany: tekst po tekście, obraz po obrazie"""
-    
-    # 1. Zbieramy wszystkie akapity (z dokumentu głównego i tabel)
     all_paras = list(doc.paragraphs)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 all_paras.extend(cell.paragraphs)
+    
+    merge_broken_tags(all_paras)
 
     for p in all_paras:
-        p_text_orig = p.text
-        if "{{" not in p_text_orig:
-            continue
-
-        # PODMIANA PODPISÓW (Priorytet)
+        # 1. PODMIAÑA PODPISÓW (Obrazy)
         for sig_tag, canv in sig_map.items():
-            pattern = r"\{\{\s*" + re.escape(sig_tag) + r"\s*\}\}"
-            if re.search(pattern, p_text_orig):
+            pattern = re.compile(r"\{\{\s*" + re.escape(sig_tag) + r"\s*\}\}", re.IGNORECASE)
+            if pattern.search(p.text):
                 if canv.image_data is not None and canv.image_data.any():
-                    # USUWAMY CAŁY TEKST AKAPITU, żeby tag nie został
-                    for run in p.runs:
-                        run.text = ""
-                    p.text = "" 
-                    # WSTAWIAMY OBRAZ
+                    # Usuwamy cały tekst tagu
+                    p.text = pattern.sub("", p.text)
+                    # Wstawiamy obrazek
                     img = Image.fromarray(canv.image_data.astype('uint8'), 'RGBA')
                     b = io.BytesIO(); img.save(b, format='PNG'); b.seek(0)
-                    p.add_run().add_picture(b, width=Inches(1.5))
-                
-        # PODMIANA TEKSTU
+                    run = p.add_run()
+                    run.add_picture(b, width=Inches(1.8))
+        
+        # 2. PODMIANA TEKSTU
         for txt_tag, val in text_map.items():
-            pattern = r"\{\{\s*" + re.escape(txt_tag) + r"\s*\}\}"
-            if re.search(pattern, p.text):
-                # Zamiana tekstu wewnątrz akapitu
-                new_text = re.sub(pattern, str(val), p.text)
-                p.text = new_text
+            pattern = re.compile(r"\{\{\s*" + re.escape(txt_tag) + r"\s*\}\}", re.IGNORECASE)
+            if pattern.search(p.text):
+                p.text = pattern.sub(str(val), p.text)
 
-# --- 3. INTERFEJS - KROK 1 ---
-st.title("📄 Home Keeper Pro v7")
+def resize_image(image_file):
+    img = Image.open(image_file)
+    if img.mode != "RGB": img = img.convert("RGB")
+    img.thumbnail((1200, 1200))
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=85)
+    return base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+# --- 3. INTERFEJS ---
+st.title("📄 Home Keeper Pro v8 - Final")
 
 if st.session_state.step == 1:
     c1, c2 = st.columns(2)
@@ -101,10 +107,11 @@ if st.session_state.step == 1:
                 b64_imgs = [resize_image(f) for f in uploaded_imgs]
                 
                 prompt = f"""
-                Jesteś rzeczoznawcą. Przeanalizuj zdjęcia i wypełnij te pola: {t_tags}.
-                ZASADA: WYPISZ KAŻDY ELEMENT OSOBNO. Nie używaj ogólników typu '3 klucze'. 
-                Napisz np. '1x piwnica, 1x Gerda, 1x pilot szlaban'. 
-                ZAKAZ STRESZCZANIA. Jeśli czegoś nie ma, zostaw puste.
+                Jesteś rzeczoznawcą nieruchomości. Przeanalizuj zdjęcia i wypełnij te pola: {t_tags}.
+                ZASADA ABSOLUTNA: 
+                - Wymień KAŻDY szczegół po przecinku. 
+                - ZAKAZ STRESZCZANIA typu '2 komplety' - musisz wypisać co wchodzi w skład każdego kompletu.
+                - Jeśli widzisz kody, notatki, numery - wpisz je wszystkie.
                 Zwróć TYLKO czysty JSON: {{"tag": "wartość"}}
                 """
                 
@@ -119,25 +126,23 @@ if st.session_state.step == 1:
                 st.session_state.step = 2
                 st.rerun()
 
-# --- 4. INTERFEJS - KROK 2 ---
 elif st.session_state.step == 2:
-    st.subheader("📝 Edycja danych i Podpisy")
+    st.subheader("📝 Sprawdź dane i podpisz oba pola")
     
-    # Edycja danych tekstowych
-    col_edit, col_sig = st.columns([1, 1])
+    col_text, col_sig = st.columns([1, 1])
     
-    with col_edit:
-        st.write("🔍 **Sprawdź treść:**")
+    with col_text:
+        st.write("🔍 **Edycja tekstów:**")
         updated_text = {}
         for tag in st.session_state.t_tags:
             val = st.session_state.data.get(tag, "")
             updated_text[tag] = st.text_area(f"Pole: {tag}", value=val, height=100)
     
     with col_sig:
-        st.write("🖋️ **Złóż podpisy:**")
+        st.write("🖋️ **Podpisy (Podpisz się w KAŻDYM polu):**")
         final_sigs = {}
         for tag in st.session_state.s_tags:
-            st.write(f"Podpis dla: **{tag}**")
+            st.write(f"Miejsce na: **{tag}**")
             final_sigs[tag] = st_canvas(
                 height=150, width=400, key=f"sig_{tag}", 
                 background_color="#f5f5f5", display_toolbar=False
