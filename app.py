@@ -2,11 +2,11 @@ import streamlit as st
 import openai
 from docx import Document
 from docx.shared import Inches
-import io, json, base64
+import io, json, base64, re
 from streamlit_drawable_canvas import st_canvas
 from PIL import Image
 
-st.set_page_config(page_title="HK Word AI", layout="wide")
+st.set_page_config(page_title="HK Universal AI Word", layout="wide")
 
 # --- KONFIGURACJA ---
 if "OPENAI_API_KEY" in st.secrets:
@@ -15,80 +15,72 @@ else:
     st.error("Błąd: Brak klucza API w Secrets!")
     st.stop()
 
-# --- FUNKCJE POMOCNICZE ---
-def get_docx_tags(docx_file):
-    """Wyciąga wszystkie tagi {{...}} z dokumentu Word"""
+# --- FUNKCJE ANALIZY DOKUMENTU ---
+def get_docx_structure(docx_file):
+    """Odczytuje dokument i znajduje tagi wraz z kontekstem (tekstem obok)"""
     doc = Document(docx_file)
-    tags = []
-    for para in doc.paragraphs:
-        import re
-        found = re.findall(r"\{\{(.*?)\}\}", para.text)
-        tags.extend(found)
+    found_tags = []
+    
+    def extract_from_text(text):
+        return re.findall(r"\{\{(.*?)\}\}", text)
+
+    # Przeszukujemy paragrafy
+    for i, para in enumerate(doc.paragraphs):
+        tags = extract_from_text(para.text)
+        for t in tags:
+            # Przekazujemy AI tekst paragrafu jako kontekst
+            found_tags.append({"tag": t, "context": para.text, "type": "text"})
+            
+    # Przeszukujemy tabele
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                found = re.findall(r"\{\{(.*?)\}\}", cell.text)
-                tags.extend(found)
-    return list(set(tags))
-
-def replace_tags_in_docx(doc, data_dict):
-    """Podmienia tagi na tekst w paragrafach i tabelach"""
-    for tag, value in data_dict.items():
-        placeholder = "{{" + tag + "}}"
-        for para in doc.paragraphs:
-            if placeholder in para.text:
-                para.text = para.text.replace(placeholder, str(value))
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    if placeholder in cell.text:
-                        cell.text = cell.text.replace(placeholder, str(value))
-
-def add_signature_to_word(doc, canvas_data, keyword):
-    """Wstawia obraz podpisu pod paragrafem zawierającym konkretne słowo"""
-    if canvas_data is not None and canvas_data.image_data is not None:
-        # Konwersja canvas do obrazu
-        img = Image.fromarray(canvas_data.image_data.astype('uint8'), 'RGBA')
-        img_byte_arr = io.BytesIO()
-        img.save(img_byte_arr, format='PNG')
-        img_byte_arr.seek(0)
-
-        for para in doc.paragraphs:
-            if keyword in para.text:
-                run = para.add_run()
-                run.add_break()
-                run.add_picture(img_byte_arr, width=Inches(1.5))
-                return
+                tags = extract_from_text(cell.text)
+                for t in tags:
+                    found_tags.append({"tag": t, "context": cell.text, "type": "text"})
+    
+    # Rozpoznajemy podpisy po nazwie tagu (jeśli zawiera 'podpis' lub 'sig')
+    for item in found_tags:
+        if any(x in item['tag'].lower() for x in ['podpis', 'sig']):
+            item['type'] = 'signature'
+            
+    return found_tags
 
 # --- INTERFEJS ---
-st.title("📑 Generator Raportów Word z AI")
+st.title("📑 Uniwersalny Generator Word AI")
+st.write("Wstaw we wzorze `{{}}` w dowolnym miejscu. AI samo zrozumie kontekst.")
 
 if 'step' not in st.session_state: st.session_state.step = 1
 
-# KROK 1: WGRYWANIE
 if st.session_state.step == 1:
-    col1, col2 = st.columns(2)
-    with col1:
-        uploaded_word = st.file_uploader("1. Wgraj wzór WORD (.docx)", type="docx")
-    with col2:
-        uploaded_imgs = st.file_uploader("2. Wgraj zdjęcia z wizyty", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+    c1, c2 = st.columns(2)
+    with c1: uploaded_word = st.file_uploader("1. Wgraj wzór WORD", type="docx")
+    with c2: uploaded_imgs = st.file_uploader("2. Wgraj zdjęcia (liczniki, klucze, notatki)", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
 
-    if st.button("🔍 ANALIZUJ DANE"):
+    if st.button("🔍 ANALIZUJ DOKUMENT I ZDJĘCIA"):
         if uploaded_word and uploaded_imgs:
-            with st.spinner("AI analizuje dokument i zdjęcia..."):
-                # 1. Pobierz tagi z Worda
-                tags = get_docx_tags(uploaded_word)
-                st.session_state.tags = tags
+            with st.spinner("AI analizuje strukturę dokumentu i czyta zdjęcia..."):
+                # 1. Analiza tagów
+                structure = get_docx_structure(uploaded_word)
+                st.session_state.structure = structure
                 
-                # 2. Przygotuj zdjęcia
+                # 2. Zdjęcia
                 b64_imgs = [base64.b64encode(f.read()).decode('utf-8') for f in uploaded_imgs]
                 
-                # 3. Zapytaj AI o wypełnienie tych konkretnych tagów
+                # 3. Prompt do AI - Bardzo szczegółowy dla kluczy i kodów
                 prompt = f"""
-                Jesteś asystentem nieruchomości. Mam dokument Word z tagami: {tags}.
-                Przeanalizuj zdjęcia i dopasuj do każdego tagu odpowiednią informację.
-                Zwróć WYŁĄCZNIE JSON, gdzie klucze to nazwy tagów (bez nawiasów), a wartości to tekst do wpisania.
-                Przykład: {{"{tags[0] if tags else 'pole'}": "wartość"}}
+                Jesteś ekspertem biura nieruchomości. 
+                Oto lista tagów znalezionych w dokumencie Word wraz z ich kontekstem (tekstem otaczającym):
+                {structure}
+                
+                Twoje zadanie:
+                1. Przeanalizuj zdjęcia. Skup się na KAŻDYM detalu.
+                2. Jeśli widnieją informacje o kluczach, wypisz: liczbę kompletów, opis każdego klucza (np. piwnica, skrzynka) oraz wszystkie KODY (do klatki, szlabanu). Nie pomijaj niczego.
+                3. Dopasuj te informacje do tagów na podstawie ich kontekstu.
+                
+                Zwróć WYŁĄCZNIE JSON, gdzie kluczem jest nazwa tagu, a wartością treść do wpisania.
+                Pomiń tagi typu 'signature'.
+                JSON format: {{"nazwa_tagu": "wyczerpująca treść"}}
                 """
                 
                 res = client.chat.completions.create(
@@ -104,50 +96,63 @@ if st.session_state.step == 1:
                 st.session_state.step = 2
                 st.rerun()
 
-# KROK 2: WERYFIKACJA I EDYCJA
 elif st.session_state.step == 2:
-    st.subheader("📝 Sprawdź i popraw dane")
-    st.info("AI wypełniło pola na podstawie Twoich tagów w Wordzie. Możesz je teraz edytować.")
+    st.subheader("📝 Weryfikacja danych")
     
-    edited_data = {}
-    for tag in st.session_state.tags:
+    # Wyświetlamy tylko pola tekstowe do edycji
+    final_data = {}
+    text_items = [i for i in st.session_state.structure if i['type'] == 'text']
+    
+    for item in text_items:
+        tag = item['tag']
         val = st.session_state.ai_results.get(tag, "")
-        edited_data[tag] = st.text_area(f"Pole: {tag}", value=val)
-    
-    st.session_state.final_data = edited_data
-    
+        final_data[tag] = st.text_area(f"Kontekst: {item['context']}", value=val, key=f"ed_{tag}")
+
     st.divider()
-    wants_sig = st.checkbox("Chcę dodać podpisy odręczne")
     
-    sig_n, sig_p = None, None
-    if wants_sig:
-        c1, c2 = st.columns(2)
-        with c1:
-            st.write("Podpis Najemcy (Przejmujący)")
-            sig_n = st_canvas(height=150, width=300, key="canvas_n", background_color="#f0f0f0", display_toolbar=False)
-        with c2:
-            st.write("Podpis Pracownika (Przekazujący)")
-            sig_p = st_canvas(height=150, width=300, key="canvas_p", background_color="#f0f0f0", display_toolbar=False)
+    # Podpisy
+    sig_items = [i for i in st.session_state.structure if i['type'] == 'signature']
+    canvases = {}
+    if sig_items:
+        st.subheader("🖋️ Podpisy")
+        cols = st.columns(len(sig_items))
+        for idx, sig in enumerate(sig_items):
+            with cols[idx]:
+                st.write(f"Podpis: {sig['tag']}")
+                canvases[sig['tag']] = st_canvas(height=150, width=250, key=f"can_{sig['tag']}", background_color="#f0f0f0", display_toolbar=False)
 
-    if st.button("🖨️ GENERUJ PLIK WORD"):
-        with st.spinner("Składanie dokumentu..."):
-            doc = Document(io.BytesIO(st.session_state.word_template))
-            
-            # Podmiana tekstów
-            replace_tags_in_docx(doc, st.session_state.final_data)
-            
-            # Dodawanie podpisów (szukamy słów Przejmujący / Przekazujący w tekście)
-            if wants_sig:
-                add_signature_to_word(doc, sig_n, "Przejmujący")
-                add_signature_to_word(doc, sig_p, "Przekazujący")
-            
-            # Zapis
-            out = io.BytesIO()
-            doc.save(out)
-            st.session_state.final_docx = out.getvalue()
-            st.success("✅ Dokument gotowy!")
-            st.download_button("📥 POBIERZ RAPORT (.docx)", st.session_state.final_docx, "raport_hk.docx")
+    if st.button("🖨️ GENERUJ FINALNY WORD"):
+        doc = Document(io.BytesIO(st.session_state.word_template))
+        
+        # Podmiana tekstów
+        for tag, value in final_data.items():
+            placeholder = "{{" + tag + "}}"
+            for para in doc.paragraphs:
+                if placeholder in para.text: para.text = para.text.replace(placeholder, str(value))
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if placeholder in cell.text: cell.text = cell.text.replace(placeholder, str(value))
 
-    if st.button("⬅️ Wróć (nowe pliki)"):
+        # Podmiana podpisów
+        for tag, canvas in canvases.items():
+            if canvas.image_data is not None:
+                img = Image.fromarray(canvas.image_data.astype('uint8'), 'RGBA')
+                buf = io.BytesIO()
+                img.save(buf, format='PNG')
+                buf.seek(0)
+                
+                placeholder = "{{" + tag + "}}"
+                for para in doc.paragraphs:
+                    if placeholder in para.text:
+                        para.text = para.text.replace(placeholder, "")
+                        para.add_run().add_picture(buf, width=Inches(1.5))
+
+        out = io.BytesIO()
+        doc.save(out)
+        st.success("✅ Gotowe!")
+        st.download_button("📥 POBIERZ RAPORT", out.getvalue(), "raport_hk.docx")
+
+    if st.button("⬅️ Wróć"):
         st.session_state.step = 1
         st.rerun()
