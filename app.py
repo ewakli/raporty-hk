@@ -73,6 +73,7 @@ with col2:
     sig_pracownik = st_canvas(stroke_width=2, stroke_color="#000", background_color="#f0f0f0", height=150, width=280, key="sig_p")
 
 # --- PROCES GENEROWANIA ---
+# --- PROCES GENEROWANIA ---
 if st.button("🚀 GENERUJ GOTOWY RAPORT PDF"):
     if not uploaded_files:
         st.warning("Najpierw wgraj zdjęcia lub wideo.")
@@ -82,75 +83,67 @@ if st.button("🚀 GENERUJ GOTOWY RAPORT PDF"):
                 # 1. Przygotowanie obrazów dla AI
                 images_for_ai = []
                 for f in uploaded_files:
-                    if f.type.startswith("image"):
-                        images_for_ai.append(base64.b64encode(f.read()).decode('utf-8'))
+                    # Resetujemy wskaźnik pliku i czytamy zawartość
+                    f.seek(0)
+                    content = f.read()
+                    images_for_ai.append(base64.b64encode(content).decode('utf-8'))
                 
                 # 2. Analiza przez OpenAI GPT-4o
-                prompt = """# 2. Analiza przez OpenAI GPT-4o
-                prompt = """Jesteś inteligentnym asystentem biura nieruchomości. 
+                prompt_text = """Jesteś inteligentnym asystentem biura nieruchomości. 
                 Przeanalizuj zdjęcia i wypisz dane do protokołu w formacie JSON.
                 Wymagane klucze w JSON: 
-                - "data": "data wizyty",
-                - "wyposażenie": "lista mebli i sprzętów",
-                - "stan_licznik_energia": "sama liczba",
+                - "data": "dzisiejsza data",
+                - "wyposażenie": "lista mebli",
+                - "stan_licznik_energia": "liczba z licznika",
                 - "uwagi_techniczne": "krótki opis usterek lub brak",
-                - "klucze": "opis przekazanych kluczy".
-                Ważne: Zwróć WYŁĄCZNIE czysty obiekt JSON, bez żadnych wstępów."""
+                - "klucze": "ile i jakie klucze".
+                Zwróć WYŁĄCZNIE czysty obiekt JSON."""
 
                 response = client.chat.completions.create(
                     model="gpt-4o",
                     messages=[{"role": "user", "content": [
-                        {"type": "text", "text": prompt},
+                        {"type": "text", "text": prompt_text},
                         *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}} for img in images_for_ai[:10]]
                     ]}],
-                    response_format={ "type": "json_object" } # <--- TO WYMUSZA POPRAWNY FORMAT
+                    response_format={ "type": "json_object" }
                 )
                 
-                # Bezpieczne wczytywanie
                 raw_content = response.choices[0].message.content
-                data = json.loads(raw_content)."""
-
-                response = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[{"role": "user", "content": [
-                        {"type": "text", "text": prompt},
-                        *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}} for img in images_for_ai[:10]]
-                    ]}]
-                )
-                
-                data = json.loads(response.choices[0].message.content.replace("```json", "").replace("```", ""))
+                data = json.loads(raw_content)
 
                 # 3. Modyfikacja PDF
-                # Upewnij się, że plik wzor_home_keeper.pdf jest w tym samym folderze na GitHub
+                # Plik wzor_home_keeper.pdf musi być w tym samym folderze na GitHub
                 doc = fitz.open("wzor_home_keeper.pdf")
                 page = doc[0]
 
-                # Nanoszenie danych (Współrzędne przykładowe - dostosuj je)
-                page.insert_text((100, 100), str(data.get('data', '')), fontsize=11, color=(0, 0, 0.6))
-                page.insert_text((100, 250), str(data.get('wyposażenie', '')), fontsize=10)
-                page.insert_text((100, 500), f"ENERGA: {data.get('stan_licznik_energia', '')}", fontsize=10)
+                # Nanoszenie danych (Współrzędne dostosowane do Twojego wzoru)
+                page.insert_text((120, 85), str(data.get('data', '')), fontsize=11, color=(0, 0, 0.5))
+                page.insert_text((70, 280), str(data.get('wyposażenie', '')), fontsize=9, color=(0, 0, 0))
+                page.insert_text((100, 525), str(data.get('stan_licznik_energia', '')), fontsize=11, color=(0, 0, 0))
+                page.insert_text((70, 420), str(data.get('uwagi_techniczne', '')), fontsize=9, color=(0, 0, 0))
+                page.insert_text((70, 630), str(data.get('klucze', '')), fontsize=9, color=(0, 0, 0))
 
-                # 4. Wstawianie podpisów
+                # 4. Wstawianie podpisów (zgodnie ze wzorem na dole strony)
                 if sig_najemca.image_data is not None and sig_pracownik.image_data is not None:
-                    # Najemca
+                    # Podpis Najemcy (Lewo)
                     img_n = Image.fromarray(sig_najemca.image_data.astype('uint8'), 'RGBA')
                     buf_n = io.BytesIO()
                     img_n.save(buf_n, format="PNG")
-                    page.insert_image(fitz.Rect(70, 750, 220, 820), stream=buf_n.getvalue()) # Lewa linia
+                    page.insert_image(fitz.Rect(70, 780, 220, 830), stream=buf_n.getvalue())
 
-                    # Pracownik
+                    # Podpis Pracownika (Prawo)
                     img_p = Image.fromarray(sig_pracownik.image_data.astype('uint8'), 'RGBA')
                     buf_p = io.BytesIO()
                     img_p.save(buf_p, format="PNG")
-                    page.insert_image(fitz.Rect(370, 750, 520, 820), stream=buf_p.getvalue()) # Prawa linia
+                    page.insert_image(fitz.Rect(370, 780, 520, 830), stream=buf_p.getvalue())
 
-                # 5. Export
+                # 5. Export pliku
                 pdf_output = io.BytesIO()
                 doc.save(pdf_output)
                 doc.close()
 
-                st.success("Raport gotowy!")
-                st.download_button("📥 Pobierz Protokół PDF", pdf_output.getvalue(), "protokol_final.pdf", "application/pdf")
+                st.success("✅ Raport został wygenerowany pomyślnie!")
+                st.download_button("📥 POBIERZ PROTOKÓŁ PDF", pdf_output.getvalue(), "protokol_home_keeper.pdf", "application/pdf")
 
             except Exception as e:
-                st.error(f"Błąd: {e}")
+                st.error(f"Wystąpił błąd podczas generowania: {str(e)}")
