@@ -8,14 +8,13 @@ from PIL import Image
 st.set_page_config(page_title="Home Keeper AI Editor", layout="wide")
 
 # --- KONFIGURACJA ---
-# Poprawiona inicjalizacja klienta OpenAI
 if "OPENAI_API_KEY" in st.secrets:
     client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 else:
     st.error("Błąd: Brak klucza API w Secrets!")
     st.stop()
 
-# --- STAN APLIKACJI (Session State) ---
+# --- STAN APLIKACJI ---
 if 'extracted_data' not in st.session_state:
     st.session_state.extracted_data = None
 if 'template_info' not in st.session_state:
@@ -41,8 +40,6 @@ if st.button("🔍 KROK 1: Analizuj i przygotuj dane"):
         with st.spinner("AI analizuje dokument i dowody..."):
             template_content = uploaded_template.read()
             template_b64, p_w, p_h = get_pdf_page_as_image(template_content)
-            
-            # Resetujemy stream, aby móc go użyć później przy generowaniu PDF
             uploaded_template.seek(0)
             
             evidence_imgs = []
@@ -54,14 +51,8 @@ if st.button("🔍 KROK 1: Analizuj i przygotuj dane"):
             Jesteś asystentem biura nieruchomości. 
             Przeanalizuj wzór dokumentu i zdjęcia z wizyty.
             Zidentyfikuj pola do wypełnienia we wzorze i dopasuj do nich informacje ze zdjęć.
-            
-            Zwróć JSON w formacie:
-            {{
-              "fields": [
-                {{"label": "Nazwa Pola", "value": "Wartość", "x": x, "y": y}}
-              ]
-            }}
-            Skala współrzędnych: 0-{int(p_w)} (X), 0-{int(p_h)} (Y).
+            Zwróć JSON: {{ "fields": [ {{"label": "Nazwa", "value": "Treść", "x": x, "y": y}} ] }}
+            Skala: 0-{int(p_w)} (X), 0-{int(p_h)} (Y).
             Zwróć TYLKO czysty JSON.
             """
 
@@ -82,25 +73,23 @@ if st.button("🔍 KROK 1: Analizuj i przygotuj dane"):
             st.session_state.template_info = {"content": template_content, "w": p_w, "h": p_h}
             st.rerun()
 
-# --- KROK 2: WERYFIKACJA I EDYCJA ---
+# --- KROK 2: EDYCJA ---
 if st.session_state.extracted_data:
     st.divider()
     st.subheader("📝 KROK 2: Zweryfikuj i uzupełnij raport")
     
     updated_fields = []
-    
     for i, field in enumerate(st.session_state.extracted_data):
         c1, c2 = st.columns([1, 3])
         with c1:
             new_label = st.text_input(f"Etykieta {i}", value=field.get('label', ''), key=f"lab_{i}")
         with c2:
             new_val = st.text_area(f"Treść {i}", value=field.get('value', ''), key=f"val_{i}", height=70)
-        
         updated_fields.append({"label": new_label, "text": new_val, "x": field['x'], "y": field['y']})
 
     st.divider()
     
-    # --- KROK 3: OPCJE PODPISU ---
+    # --- KROK 3: PODPISY I FINALIZACJA ---
     st.subheader("🖋️ KROK 3: Podpisy i Finalizacja")
     wants_signature = st.checkbox("Dodaj pola podpisów elektronicznych")
     
@@ -110,10 +99,10 @@ if st.session_state.extracted_data:
     if wants_signature:
         col_sig1, col_sig2 = st.columns(2)
         with col_sig1:
-            st.caption("Podpis Najemcy (Przejmujący)")
+            st.caption("Podpis Najemcy")
             sig_n = st_canvas(stroke_width=2, stroke_color="#000", background_color="#f0f0f0", height=150, width=300, key="canvas_n")
         with col_sig2:
-            st.caption("Podpis Pracownika (Przekazujący)")
+            st.caption("Podpis Pracownika")
             sig_p = st_canvas(stroke_width=2, stroke_color="#000", background_color="#f0f0f0", height=150, width=300, key="canvas_p")
 
     if st.button("🖨️ GENERUJ FINALNY PDF"):
@@ -121,33 +110,29 @@ if st.session_state.extracted_data:
             doc = fitz.open(stream=st.session_state.template_info["content"], filetype="pdf")
             page = doc[0]
             
-            # Wstawianie edytowanego tekstu
             for field in updated_fields:
                 page.insert_text((field['x'], field['y']), str(field['text']), fontsize=10, color=(0, 0, 0.5))
             
-            # Wstawianie podpisów, jeśli wybrano opcję
             if wants_signature:
-                def place_signature(keyword, canvas_obj, offset_y=-60):
+                def place_signature(keyword, canvas_obj):
                     if canvas_obj is not None and canvas_obj.image_data is not None:
-                        # Sprawdzamy czy w ogóle coś narysowano (uproszczone)
                         areas = page.search_for(keyword)
                         if areas:
-                            rect = areas[-1] # Ostatnie wystąpienie słowa na stronie
+                            rect = areas[-1]
                             img = Image.fromarray(canvas_obj.image_data.astype('uint8'), 'RGBA')
                             buf = io.BytesIO()
                             img.save(buf, format="PNG")
-                            # Rect: x0, y0, x1, y1
-                            page.insert_image(fitz.Rect(rect.x0, rect.y0 + offset_y, rect.x0 + 140, rect.y0), stream=buf.getvalue())
+                            page.insert_image(fitz.Rect(rect.x0, rect.y0 - 60, rect.x0 + 140, rect.y0), stream=buf.getvalue())
 
                 place_signature("Przejmujący", sig_n)
                 place_signature("Przekazujący", sig_p)
             
             output = io.BytesIO()
             doc.save(output)
-            st.success("✅ PDF gotowy do pobrania!")
-            st.download_button("📥 Pobierz gotowy raport", output.getvalue(), "raport_homekeeper.pdf", "application/pdf")
+            st.success("✅ PDF gotowy!")
+            st.download_button("📥 Pobierz raport", output.getvalue(), "raport.pdf", "application/pdf")
 
-    if st.button("🗑️ Wyczyść i zacznij od nowa"):
+    if st.button("🗑️ Zacznij od nowa"):
         st.session_state.extracted_data = None
         st.session_state.template_info = None
         st.rerun()
