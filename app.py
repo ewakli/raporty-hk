@@ -69,9 +69,14 @@ if st.button("🔍 KROK 1: Analizuj i przygotuj dane"):
                 response_format={ "type": "json_object" }
             )
             
-            st.session_state.extracted_data = json.loads(response.choices[0].message.content).get("fields", [])
-            st.session_state.template_info = {"content": template_content, "w": p_w, "h": p_h}
-            st.rerun()
+            res_content = response.choices[0].message.content
+            
+            if res_content:
+                st.session_state.extracted_data = json.loads(res_content).get("fields", [])
+                st.session_state.template_info = {"content": template_content, "w": p_w, "h": p_h}
+                st.rerun()
+            else:
+                st.error("AI nie zwróciło żadnych danych. Spróbuj wgrać mniej zdjęć lub lepszej jakości.")
 
 # --- KROK 2: EDYCJA I FINALIZACJA ---
 if st.session_state.extracted_data:
