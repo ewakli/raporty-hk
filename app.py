@@ -73,7 +73,7 @@ if st.button("🔍 KROK 1: Analizuj i przygotuj dane"):
             st.session_state.template_info = {"content": template_content, "w": p_w, "h": p_h}
             st.rerun()
 
-# --- KROK 2: EDYCJA ---
+# --- KROK 2: EDYCJA I FINALIZACJA ---
 if st.session_state.extracted_data:
     st.divider()
     st.subheader("📝 KROK 2: Zweryfikuj i uzupełnij raport")
@@ -88,8 +88,6 @@ if st.session_state.extracted_data:
         updated_fields.append({"label": new_label, "text": new_val, "x": field['x'], "y": field['y']})
 
     st.divider()
-    
-    # --- KROK 3: PODPISY I FINALIZACJA ---
     st.subheader("🖋️ KROK 3: Podpisy i Finalizacja")
     wants_signature = st.checkbox("Dodaj pola podpisów elektronicznych")
     
@@ -127,10 +125,11 @@ if st.session_state.extracted_data:
                 place_signature("Przejmujący", sig_n)
                 place_signature("Przekazujący", sig_p)
             
-            output = io.BytesIO()
-            doc.save(output)
+            output_pdf = io.BytesIO()
+            doc.save(output_pdf)
+            doc.close()
             st.success("✅ PDF gotowy!")
-            st.download_button("📥 Pobierz raport", output.getvalue(), "raport.pdf", "application/pdf")
+            st.download_button("📥 Pobierz raport", output_pdf.getvalue(), "raport.pdf", "application/pdf")
 
     if st.button("🗑️ Zacznij od nowa"):
         st.session_state.extracted_data = None
