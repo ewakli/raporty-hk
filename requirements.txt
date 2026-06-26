@@ -4,3 +4,4 @@ pymupdf
 streamlit-drawable-canvas
 Pillow
 opencv-python-headless
+streamlit-image-coordinates
