@@ -1,165 +1,146 @@
 import streamlit as st
 import openai
 import fitz  # PyMuPDF
-import io
-import json
-import base64
-import cv2
-import numpy as np
+import io, json, base64
 from streamlit_drawable_canvas import st_canvas
 from PIL import Image
 
-# --- KONFIGURACJA POCZĄTKOWA ---
-st.set_page_config(page_title="Home Keeper Mobile Report", layout="centered")
+st.set_page_config(page_title="AI Report Editor", layout="wide")
 
-# Pobieranie klucza API z bezpiecznych ustawień Streamlit Secrets
+# --- KONFIGURACJA ---
 if "OPENAI_API_KEY" in st.secrets:
-    client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    client = openai.openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 else:
     st.error("Błąd: Brak klucza API w Secrets!")
 
-# --- SYSTEM LOGOWANIA ---
-if 'auth' not in st.session_state:
-    st.session_state.auth = False
+# --- STAN APLIKACJI (Session State) ---
+if 'extracted_data' not in st.session_state:
+    st.session_state.extracted_data = None
+if 'template_info' not in st.session_state:
+    st.session_state.template_info = None
 
-def login():
-    st.title("🏠 Home Keeper System")
-    user = st.text_input("Użytkownik")
-    pw = st.text_input("Hasło", type="password")
-    if st.button("Zaloguj się"):
-        if user == "admin" and pw == "HK2024": # Tutaj zmień swoje hasło
-            st.session_state.auth = True
+def get_pdf_page_as_image(pdf_stream):
+    doc = fitz.open(stream=pdf_stream, filetype="pdf")
+    page = doc[0]
+    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+    return base64.b64encode(pix.tobytes("png")).decode('utf-8'), page.rect.width, page.rect.height
+
+# --- INTERFEJS ---
+st.title("📄 Inteligentny Edytor Raportów")
+
+col_a, col_b = st.columns(2)
+with col_a:
+    uploaded_template = st.file_uploader("1. Wgraj WZÓR PDF", type="pdf")
+with col_b:
+    uploaded_data = st.file_uploader("2. Wgraj ZDJĘCIA/WIDEO", type=["jpg", "png", "mp4"], accept_multiple_files=True)
+
+if st.button("🔍 KROK 1: Analizuj i przygotuj dane"):
+    if uploaded_template and uploaded_data:
+        with st.spinner("AI analizuje dokument i dowody..."):
+            # Przygotowanie obrazów
+            template_b64, p_w, p_h = get_pdf_page_as_image(uploaded_template.read())
+            uploaded_template.seek(0) # reset streamu
+            
+            evidence_imgs = [base64.b64encode(f.read()).decode('utf-8') for f in uploaded_data if f.type.startswith("image")]
+            
+            prompt = f"""
+            Jesteś asystentem biura nieruchomości. 
+            Przeanalizuj wzór dokumentu i zdjęcia z wizyty.
+            Zidentyfikuj pola do wypełnienia we wzorze i dopasuj do nich informacje ze zdjęć.
+            
+            Zwróć JSON w formacie:
+            {{
+              "fields": [
+                {{"label": "Nazwa Pola (np. Licznik)", "value": "Wartość ze zdjęć", "x": x, "y": y}}
+              ]
+            }}
+            Skala współrzędnych: 0-{int(p_w)} (X), 0-{int(p_h)} (Y).
+            Zwróć TYLKO czysty JSON.
+            """
+
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{template_b64}"}},
+                        *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}} for img in evidence_imgs[:5]]
+                    ]
+                }],
+                response_format={ "type": "json_object" }
+            )
+            
+            st.session_state.extracted_data = json.loads(response.choices[0].message.content).get("fields", [])
+            st.session_state.template_info = {"stream": uploaded_template.read(), "w": p_w, "h": p_h}
             st.rerun()
-        else:
-            st.error("Nieprawidłowe dane logowania.")
 
-if not st.session_state.auth:
-    login()
-    st.stop()
-
-# --- FUNKCJE POMOCNICZE ---
-def process_video(video_bytes):
-    """Wyciąga klatki z filmu dla AI"""
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp:
-        tmp.write(video_bytes)
-        video_path = tmp.name
+# --- KROK 2: WERYFIKACJA I EDYCJA ---
+if st.session_state.extracted_data:
+    st.divider()
+    st.subheader("📝 KROK 2: Zweryfikuj i uzupełnij raport")
+    st.write("AI przygotowało propozycję wpisów. Możesz je teraz dowolnie edytować przed zapisem do PDF.")
     
-    cap = cv2.VideoCapture(video_path)
-    frames = []
-    while len(frames) < 10: # Pobierz 10 klatek z filmu
-        ret, frame = cap.read()
-        if not ret: break
-        if int(cap.get(cv2.CAP_PROP_POS_FRAMES)) % 30 == 0:
-            _, buffer = cv2.imencode('.jpg', frame)
-            frames.append(base64.b64encode(buffer).decode('utf-8'))
-    cap.release()
-    return frames
+    updated_fields = []
+    
+    # Tworzymy dynamiczny formularz
+    for i, field in enumerate(st.session_state.extracted_data):
+        col_f1, col_f2 = st.columns([1, 2])
+        with col_f1:
+            label = st.text_input(f"Pole {i+1}", value=field['label'], key=f"label_{i}")
+        with col_f2:
+            val = st.text_area(f"Wartość {i+1}", value=field['value'], key=f"val_{i}", height=68)
+        
+        updated_fields.append({"label": label, "text": val, "x": field['x'], "y": field['y']})
 
-# --- INTERFEJS UŻYTKOWNIKA ---
-st.title("📝 Protokół Zdawczo-Odbiorczy")
-st.write("Wypełnij raport używając aparatu i złóż podpisy.")
+    # Opcja dodania nowego pola ręcznie
+    if st.button("+ Dodaj inne pole (ręcznie)"):
+        updated_fields.append({"label": "Nowe pole", "text": "", "x": 100, "y": 100})
+        st.session_state.extracted_data = updated_fields
+        st.rerun()
 
-uploaded_files = st.file_uploader("Dodaj zdjęcia lub wideo (JPEG/MP4)", type=["jpg", "jpeg", "png", "mp4"], accept_multiple_files=True)
+    st.divider()
+    
+    # --- KROK 3: OPCJE PODPISU ---
+    st.subheader("🖋️ KROK 3: Podpisy i Finalizacja")
+    wants_signature = st.checkbox("Chcę dodać podpisy elektroniczne do tego raportu")
+    
+    sig_n = None
+    sig_p = None
 
-st.subheader("🖋️ Podpisy")
-col1, col2 = st.columns(2)
+    if wants_signature:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.caption("Podpis Najemcy")
+            sig_n = st_canvas(stroke_width=2, stroke_color="#000", background_color="#f0f0f0", height=100, width=300, key="sn")
+        with c2:
+            st.caption("Podpis Pracownika")
+            sig_p = st_canvas(stroke_width=2, stroke_color="#000", background_color="#f0f0f0", height=100, width=300, key="sp")
 
-with col1:
-    st.caption("Najemca (Przejmujący)")
-    sig_najemca = st_canvas(stroke_width=2, stroke_color="#000", background_color="#f0f0f0", height=150, width=280, key="sig_n")
+    if st.button("🖨️ GENERUJ FINALNY PDF"):
+        with st.spinner("Składanie dokumentu..."):
+            doc = fitz.open(stream=st.session_state.template_info["stream"], filetype="pdf")
+            page = doc[0]
+            
+            # Naniesienie edytowanych danych
+            for field in updated_fields:
+                page.insert_text((field['x'], field['y']), field['text'], fontsize=10, color=(0, 0, 0.6))
+            
+            # Naniesienie podpisów (opcjonalnie)
+            if wants_signature:
+                def apply_sig(keyword, canvas):
+                    if canvas and canvas.image_data is not None:
+                        areas = page.search_for(keyword)
+                        if areas:
+                            r = areas[-1]
+                            img = Image.fromarray(canvas.image_data.astype('uint8'), 'RGBA')
+                            b = io.BytesIO(); img.save(b, format="PNG")
+                            page.insert_image(fitz.Rect(r.x0, r.y0-50, r.x0+150, r.y0), stream=b.getvalue())
 
-with col2:
-    st.caption("Pracownik (HK)")
-    sig_pracownik = st_canvas(stroke_width=2, stroke_color="#000", background_color="#f0f0f0", height=150, width=280, key="sig_p")
-
-# --- PROCES GENEROWANIA ---
-# --- PROCES GENEROWANIA ---
-if st.button("🚀 GENERUJ GOTOWY RAPORT PDF"):
-    if not uploaded_files:
-        st.warning("Najpierw wgraj zdjęcia lub wideo.")
-    else:
-        with st.spinner("AI analizuje dane i przygotowuje PDF..."):
-            try:
-                # 1. Przygotowanie obrazów dla AI
-                images_for_ai = []
-                for f in uploaded_files:
-                    # Resetujemy wskaźnik pliku i czytamy zawartość
-                    f.seek(0)
-                    content = f.read()
-                    images_for_ai.append(base64.b64encode(content).decode('utf-8'))
-                
-                # 2. Analiza przez OpenAI GPT-4o
-                prompt_text = """Jesteś inteligentnym asystentem biura nieruchomości. 
-                Przeanalizuj zdjęcia i wypisz dane do protokołu w formacie JSON.
-                Wymagane klucze w JSON: 
-                - "data": "dzisiejsza data",
-                - "wyposażenie": "lista mebli",
-                - "stan_licznik_energia": "liczba z licznika",
-                - "uwagi_techniczne": "krótki opis usterek lub brak",
-                - "klucze": "ile i jakie klucze".
-                Zwróć WYŁĄCZNIE czysty obiekt JSON."""
-
-                response = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[{"role": "user", "content": [
-                        {"type": "text", "text": prompt_text},
-                        *[{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}} for img in images_for_ai[:10]]
-                    ]}],
-                    response_format={ "type": "json_object" }
-                )
-                
-                raw_content = response.choices[0].message.content
-                data = json.loads(raw_content)
-
-                # 3. Modyfikacja PDF
-                doc = fitz.open("wzor_home_keeper.pdf")
-                page = doc[0]
-
-                # Funkcja pomocnicza do czyszczenia tekstu (usuwa nawiasy i cudzysłowy)
-                def clean_text(text):
-                    if isinstance(text, list):
-                        return ", ".join(text)
-                    return str(text).replace("[", "").replace("]", "").replace("'", "")
-
-                # NANOSZENIE DANYCH (Poprawione współrzędne na podstawie Twojego wyniku)
-                # Format: (X, Y) - im większe Y, tym niżej. Im większe X, tym bardziej w prawo.
-                
-                # Data (Linia: W dniu... roku)
-                page.insert_text((115, 102), clean_text(data.get('data', '')), fontsize=11, color=(0, 0, 0.6))
-                
-                # Wyposażenie (Punkt 1) - zaczynamy wyżej i czyścimy tekst
-                page.insert_text((70, 312), clean_text(data.get('wyposażenie', '')), fontsize=9, color=(0, 0, 0))
-                
-                # Uwagi techniczne (Punkt 2) - przesunięte wyżej
-                page.insert_text((70, 445), clean_text(data.get('uwagi_techniczne', '')), fontsize=9, color=(0, 0, 0))
-                
-                # Licznik ENERGA (Sekcja Stan Liczników) - przesunięty znacznie wyżej
-                page.insert_text((110, 545), clean_text(data.get('stan_licznik_energia', '')), fontsize=11, color=(0, 0, 0))
-                
-                # Klucze (Sekcja kluczy) - przesunięte wyżej na kropki
-                page.insert_text((120, 655), clean_text(data.get('klucze', '')), fontsize=9, color=(0, 0, 0))
-
-                # 4. Wstawianie podpisów (Przesunięte wyżej, żeby leżały na kropkach)
-                if sig_najemca.image_data is not None and sig_pracownik.image_data is not None:
-                    # Podpis Najemcy (Lewo) - Rect(lewo, góra, prawo, dół)
-                    img_n = Image.fromarray(sig_najemca.image_data.astype('uint8'), 'RGBA')
-                    buf_n = io.BytesIO()
-                    img_n.save(buf_n, format="PNG")
-                    page.insert_image(fitz.Rect(70, 810, 220, 880), stream=buf_n.getvalue())
-
-                    # Podpis Pracownika (Prawo)
-                    img_p = Image.fromarray(sig_pracownik.image_data.astype('uint8'), 'RGBA')
-                    buf_p = io.BytesIO()
-                    img_p.save(buf_p, format="PNG")
-                    page.insert_image(fitz.Rect(370, 810, 520, 880), stream=buf_p.getvalue())
-
-                # 5. Export pliku
-                pdf_output = io.BytesIO()
-                doc.save(pdf_output)
-                doc.close()
-
-                st.success("✅ Raport został wygenerowany pomyślnie!")
-                st.download_button("📥 POBIERZ PROTOKÓŁ PDF", pdf_output.getvalue(), "protokol_home_keeper.pdf", "application/pdf")
-
-            except Exception as e:
-                st.error(f"Wystąpił błąd podczas generowania: {str(e)}")
+                apply_sig("Przejmujący", sig_n)
+                apply_sig("Przekazujący", sig_p)
+            
+            out = io.BytesIO()
+            doc.save(out)
+            st.success("PDF gotowy!")
+            st.download_button("📥 Pobierz Raport", out.getvalue(), "raport_koncowy.pdf")
