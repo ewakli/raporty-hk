@@ -6,171 +6,139 @@ import io, json, base64, re
 from streamlit_drawable_canvas import st_canvas
 from PIL import Image
 
-st.set_page_config(page_title="HK Universal AI Word", layout="wide")
+st.set_page_config(page_title="Home Keeper AI - Word Editor", layout="wide")
 
-# --- INICJALIZACJA SESJI (Zapobieganie AttributeError) ---
+# --- 1. INICJALIZACJA SYSTEMU ---
 if 'step' not in st.session_state: st.session_state.step = 1
-if 'structure' not in st.session_state: st.session_state.structure = []
-if 'ai_results' not in st.session_state: st.session_state.ai_results = {}
-if 'word_template' not in st.session_state: st.session_state.word_template = None
-if 'text_tags' not in st.session_state: st.session_state.text_tags = []
+if 'extracted_data' not in st.session_state: st.session_state.extracted_data = {}
+if 'template_bytes' not in st.session_state: st.session_state.template_bytes = None
+if 'found_tags' not in st.session_state: st.session_state.found_tags = []
 
-# --- KONFIGURACJA API ---
 if "OPENAI_API_KEY" in st.secrets:
     client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 else:
-    st.error("Błąd: Brak klucza API w Secrets!")
+    st.error("Błąd: Skonfiguruj klucz API w Secrets!")
     st.stop()
 
-# --- FUNKCJE ANALIZY ---
-def get_docx_structure(docx_file):
-    """Odczytuje dokument i znajduje tagi wraz z kontekstem"""
+# --- 2. FUNKCJE POMOCNICZE ---
+def get_tags_from_docx(docx_file):
     doc = Document(docx_file)
-    found_tags = []
-    
-    def extract_tags(text):
-        return re.findall(r"\{\{(.*?)\}\}", text)
-
-    # Szukanie w paragrafach
-    for para in doc.paragraphs:
-        tags = extract_tags(para.text)
-        for t in tags:
-            tag_type = 'signature' if any(x in t.lower() for x in ['podpis', 'sig']) else 'text'
-            found_tags.append({"tag": t, "context": para.text.strip(), "type": tag_type})
-            
-    # Szukanie w tabelach
+    text = ""
+    for para in doc.paragraphs: text += para.text + " "
     for table in doc.tables:
         for row in table.rows:
-            for cell in row.cells:
-                tags = extract_tags(cell.text)
-                for t in tags:
-                    tag_type = 'signature' if any(x in t.lower() for x in ['podpis', 'sig']) else 'text'
-                    found_tags.append({"tag": t, "context": cell.text.strip(), "type": tag_type})
-    
-    return found_tags
+            for cell in row.cells: text += cell.text + " "
+    return list(set(re.findall(r"\{\{(.*?)\}\}", text)))
 
-# --- INTERFEJS ---
-st.title("📑 Inteligentny Generator Word HK")
+def replace_tags(doc, data):
+    for tag, val in data.items():
+        placeholder = "{{" + tag + "}}"
+        for para in doc.paragraphs:
+            if placeholder in para.text:
+                para.text = para.text.replace(placeholder, str(val))
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if placeholder in cell.text:
+                        cell.text = cell.text.replace(placeholder, str(val))
 
-# KROK 1: Ładowanie i Analiza
+# --- 3. INTERFEJS - KROK 1: WGRYWANIE ---
+st.title("📑 Generator Raportów Word")
+
 if st.session_state.step == 1:
+    col1, col2 = st.columns(2)
+    with col1:
+        uploaded_word = st.file_uploader("1. Wgraj wzór Word (.docx)", type="docx")
+    with col2:
+        uploaded_imgs = st.file_uploader("2. Wgraj zdjęcia z wizyty", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+
+    if st.button("🔍 ANALIZUJ ZDJĘCIA I WYPEŁNIJ WZÓR"):
+        if uploaded_word and uploaded_imgs:
+            with st.spinner("AI analizuje zdjęcia... to może potrwać do minuty."):
+                # Odczyt tagów
+                tags = get_tags_from_docx(uploaded_word)
+                st.session_state.found_tags = tags
+                
+                # Przygotowanie zdjęć
+                b64_imgs = []
+                for f in uploaded_imgs:
+                    f.seek(0)
+                    b64_imgs.append(base64.b64encode(f.read()).decode('utf-8'))
+                
+                # Zapytanie do AI
+                prompt = f"""
+                Jesteś profesjonalnym asystentem biura nieruchomości. 
+                Przeanalizuj załączone zdjęcia (liczniki, notatki, klucze).
+                Twoim zadaniem jest wypełnienie tych pól z dokumentu: {tags}.
+                
+                Szczególną uwagę zwróć na:
+                - Liczniki (cyfry).
+                - Klucze (ilość, opisy: piwnica, skrzynka, piloty).
+                - Kody (do klatki, do szlabanu).
+                - Wyposażenie (lista mebli).
+                
+                Zwróć WYŁĄCZNIE czysty JSON: {{"nazwa_tagu": "odczytana_wartosc"}}.
+                """
+                
+                response = client.chat.completions.create(
+                    model="gpt-4o",
+                    messages=[{"role":"user","content":[{"type":"text","text":prompt},
+                    *[{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{i}"}} for i in b64_imgs[:10]]]}],
+                    response_format={"type": "json_object"}
+                )
+                
+                st.session_state.extracted_data = json.loads(response.choices[0].message.content)
+                uploaded_word.seek(0)
+                st.session_state.template_bytes = uploaded_word.read()
+                st.session_state.step = 2
+                st.rerun()
+
+# --- 4. INTERFEJS - KROK 2: WERYFIKACJA I PODPISY ---
+elif st.session_state.step == 2:
+    st.subheader("📝 Sprawdź i popraw dane")
+    st.write("AI odczytało poniższe informacje. Możesz je teraz edytować:")
+    
+    updated_data = {}
+    # Wyświetlamy pola w układzie, który był dobry
+    for tag in st.session_state.found_tags:
+        val = st.session_state.extracted_data.get(tag, "")
+        updated_data[tag] = st.text_area(f"Pole: {tag}", value=val, height=100)
+    
+    st.divider()
+    st.subheader("🖋️ Podpisy")
+    st.info("Złóż podpisy poniżej (najlepiej na telefonie/tablecie).")
+    
     c1, c2 = st.columns(2)
     with c1:
-        uploaded_word = st.file_uploader("1. Wgraj wzór WORD", type="docx")
+        st.write("Podpis Najemcy")
+        sig_n = st_canvas(height=150, width=300, key="sig_n", background_color="#f0f0f0", display_toolbar=False)
     with c2:
-        uploaded_imgs = st.file_uploader("2. Wgraj zdjęcia (liczniki, klucze, kody)", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+        st.write("Podpis Pracownika")
+        sig_p = st_canvas(height=150, width=300, key="sig_p", background_color="#f0f0f0", display_toolbar=False)
 
-    if st.button("🔍 ANALIZUJ DOKUMENT I ZDJĘCIA"):
-        if uploaded_word and uploaded_imgs:
-            with st.spinner("AI analizuje strukturę i zdjęcia..."):
-                try:
-                    # 1. Analiza struktury
-                    st.session_state.structure = get_docx_structure(uploaded_word)
-                    
-                    # 2. Zdjęcia
-                    b64_imgs = [base64.b64encode(f.read()).decode('utf-8') for f in uploaded_imgs]
-                    
-                    # 3. Prompt do AI
-                    prompt = f"""
-                    Jesteś ekspertem biura nieruchomości. 
-                    Oto lista miejsc do wypełnienia w Wordzie (tagi {{...}}) wraz z tekstem obok:
-                    {st.session_state.structure}
-                    
-                    Przeanalizuj zdjęcia. Skup się na:
-                    - KLUCZE: ile kompletów, opis (piwnica, listy, śmietnik).
-                    - KODY: do klatki (domofon), do szlabanu, do skrytki.
-                    - LICZNIKI: energia, woda, gaz.
-                    
-                    Zwróć WYŁĄCZNIE JSON, gdzie kluczem jest nazwa tagu, a wartością treść.
-                    Format: {{"nazwa_tagu": "dokładna treść"}}
-                    """
-                    
-                    res = client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[{"role":"user","content":[{"type":"text","text":prompt},
-                        *[{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{i}"}} for i in b64_imgs[:10]]]}],
-                        response_format={"type": "json_object"}
-                    )
-                    
-                    st.session_state.ai_results = json.loads(res.choices[0].message.content)
-                    uploaded_word.seek(0)
-                    st.session_state.word_template = uploaded_word.read()
-                    st.session_state.step = 2
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Wystąpił błąd podczas analizy: {e}")
-
-# KROK 2: Weryfikacja i Podpisy
-elif st.session_state.step == 2:
-    if not st.session_state.structure:
-        st.warning("Brak danych do wyświetlenia. Wróć do Kroku 1.")
-        if st.button("⬅️ Wróć do początku"):
-            st.session_state.step = 1
-            st.rerun()
-        st.stop()
-
-    st.subheader("📝 Zweryfikuj dane sczytane przez AI")
-    
-    final_data = {}
-    text_items = [i for i in st.session_state.structure if i['type'] == 'text']
-    
-    # Wyświetlanie pól do edycji
-    for item in text_items:
-        tag = item['tag']
-        val = st.session_state.ai_results.get(tag, "")
-        final_data[tag] = st.text_area(f"Pole: {tag} (Kontekst: {item['context']})", value=val, key=f"input_{tag}")
-
-    st.divider()
-    
-    # Sekcja podpisów
-    sig_items = [i for i in st.session_state.structure if i['type'] == 'signature']
-    canvases = {}
-    if sig_items:
-        st.subheader("🖋️ Podpisy")
-        cols = st.columns(len(sig_items))
-        for idx, sig in enumerate(sig_items):
-            with cols[idx]:
-                st.write(f"Złóż podpis: {sig['tag']}")
-                canvases[sig['tag']] = st_canvas(
-                    height=150, width=280, key=f"canvas_{sig['tag']}", 
-                    background_color="#f0f0f0", display_toolbar=False
-                )
-
-    # Generowanie pliku
-    if st.button("🖨️ GENERUJ FINALNY WORD"):
+    if st.button("🖨️ GENERUJ I POBIERZ RAPORT WORD"):
         with st.spinner("Składanie dokumentu..."):
-            doc = Document(io.BytesIO(st.session_state.word_template))
+            doc = Document(io.BytesIO(st.session_state.template_bytes))
             
             # Podmiana tekstów
-            for tag, value in final_data.items():
-                placeholder = "{{" + tag + "}}"
-                for para in doc.paragraphs:
-                    if placeholder in para.text: para.text = para.text.replace(placeholder, str(value))
-                for table in doc.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            if placeholder in cell.text: cell.text = cell.text.replace(placeholder, str(value))
+            replace_tags(doc, updated_data)
+            
+            # Dodawanie podpisów na końcu dokumentu
+            def add_sig(canv, label):
+                if canv.image_data is not None:
+                    img = Image.fromarray(canv.image_data.astype('uint8'), 'RGBA')
+                    b = io.BytesIO(); img.save(b, format='PNG'); b.seek(0)
+                    p = doc.add_paragraph(label)
+                    p.add_run().add_picture(b, width=Inches(1.5))
 
-            # Podmiana podpisów
-            for tag, canvas in canvases.items():
-                if canvas is not None and canvas.image_data is not None:
-                    img = Image.fromarray(canvas.image_data.astype('uint8'), 'RGBA')
-                    buf = io.BytesIO()
-                    img.save(buf, format='PNG')
-                    buf.seek(0)
-                    
-                    placeholder = "{{" + tag + "}}"
-                    for para in doc.paragraphs:
-                        if placeholder in para.text:
-                            para.text = para.text.replace(placeholder, "")
-                            para.add_run().add_picture(buf, width=Inches(1.5))
-
+            add_sig(sig_n, "Podpis Najemcy:")
+            add_sig(sig_p, "Podpis Pracownika:")
+            
             out = io.BytesIO()
             doc.save(out)
-            st.success("✅ Gotowe!")
-            st.download_button("📥 POBIERZ RAPORT", out.getvalue(), "raport_hk.docx")
+            st.success("✅ Dokument gotowy!")
+            st.download_button("📥 POBIERZ PLIK WORD (.docx)", out.getvalue(), "raport_finalny.docx")
 
-    if st.button("🗑️ Zacznij od nowa"):
+    if st.button("⬅️ Wróć i wgraj inne pliki"):
         st.session_state.step = 1
-        st.session_state.structure = []
         st.rerun()
