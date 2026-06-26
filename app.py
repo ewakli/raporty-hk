@@ -6,9 +6,9 @@ import io, json, base64, re
 from streamlit_drawable_canvas import st_canvas
 from PIL import Image
 
-st.set_page_config(page_title="HK Smart Word AI", layout="wide")
+st.set_page_config(page_title="HK Word AI v4", layout="wide")
 
-# --- 1. CONFIG & STATE ---
+# --- KONFIGURACJA ---
 if "OPENAI_API_KEY" in st.secrets:
     client = openai.OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 else:
@@ -17,122 +17,136 @@ else:
 
 if 'step' not in st.session_state: st.session_state.step = 1
 if 'data' not in st.session_state: st.session_state.data = {}
-if 't_tags' not in st.session_state: st.session_state.t_tags = []
-if 's_tags' not in st.session_state: st.session_state.s_tags = []
 
-# --- 2. LOGIKA WORD ---
+# --- FUNKCJE POMOCNICZE ---
+def resize_image(image_file):
+    img = Image.open(image_file)
+    if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+    img.thumbnail((1024, 1024))
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=85)
+    return base64.b64encode(buffer.getvalue()).decode('utf-8')
+
 def get_tags(docx_file):
     doc = Document(docx_file)
-    all_text = ""
-    for p in doc.paragraphs: all_text += p.text + " "
+    full_text = ""
+    for p in doc.paragraphs: full_text += p.text + " "
     for t in doc.tables:
         for r in t.rows:
-            for c in r.cells: all_text += c.text + " "
+            for c in r.cells: full_text += c.text + " "
     
-    found = re.findall(r"\{\{(.*?)\}\}", all_text)
-    cleaned = [t.strip() for t in found]
+    found = re.findall(r"\{\{(.*?)\}\}", full_text)
+    # Czyścimy tagi ze spacji na początku i końcu
+    cleaned = [t.strip() for t in found if t.strip() != ""]
     text_tags = [t for t in set(cleaned) if 'podpis' not in t.lower()]
     sig_tags = [t for t in set(cleaned) if 'podpis' in t.lower()]
     return text_tags, sig_tags
 
-def process_word(doc, text_map, sig_map):
-    """Zastępuje tagi tekstem lub obrazem we wszystkich sekcjach"""
-    def replace_in_paras(paras):
-        for p in paras:
-            # Tekst
-            for tag, val in text_map.items():
-                target = "{{" + tag + "}}"
-                if target in p.text:
-                    p.text = p.text.replace(target, str(val))
-            # Podpisy
-            for tag, canv in sig_map.items():
-                target = "{{" + tag + "}}"
-                if target in p.text and canv.image_data is not None:
-                    p.text = p.text.replace(target, "")
-                    img = Image.fromarray(canv.image_data.astype('uint8'), 'RGBA')
-                    b = io.BytesIO(); img.save(b, format='PNG'); b.seek(0)
-                    p.add_run().add_picture(b, width=Inches(1.8))
+def replace_text_in_paragraph(paragraph, key, value, is_signature=False, canvas_data=None):
+    """Zaawansowana funkcja podmieniająca tagi na tekst lub obraz"""
+    # Szukamy tagu ignorując spacje wewnątrz klamer: {{ tag }}
+    search_pattern = r"\{\{\s*" + re.escape(key) + r"\s*\}\}"
+    
+    if re.search(search_pattern, paragraph.text):
+        if is_signature and canvas_data is not None:
+            if canvas_data.image_data is not None:
+                # Usuwamy tekst tagu
+                paragraph.text = re.sub(search_pattern, "", paragraph.text)
+                # Wstawiamy obraz
+                img = Image.fromarray(canvas_data.image_data.astype('uint8'), 'RGBA')
+                b = io.BytesIO(); img.save(b, format='PNG'); b.seek(0)
+                run = paragraph.add_run()
+                run.add_picture(b, width=Inches(2.0))
+        else:
+            # Zwykła podmiana tekstu
+            paragraph.text = re.sub(search_pattern, str(value), paragraph.text)
 
-    replace_in_paras(doc.paragraphs)
+def process_word_document(doc_bytes, text_map, sig_map):
+    doc = Document(io.BytesIO(doc_bytes))
+    
+    # 1. Przetwarzamy paragrafy
+    for p in doc.paragraphs:
+        for tag, val in text_map.items():
+            replace_text_in_paragraph(p, tag, val)
+        for tag, canv in sig_map.items():
+            replace_text_in_paragraph(p, tag, "", is_signature=True, canvas_data=canv)
+            
+    # 2. Przetwarzamy tabele
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                replace_in_paras(cell.paragraphs)
+                for p in cell.paragraphs:
+                    for tag, val in text_map.items():
+                        replace_text_in_paragraph(p, tag, val)
+                    for tag, canv in sig_map.items():
+                        replace_text_in_paragraph(p, tag, "", is_signature=True, canvas_data=canv)
+    return doc
 
-# --- 3. KROK 1: ANALIZA ---
-st.title("🏗️ Home Keeper Pro - Generator Word")
+# --- INTERFEJS ---
+st.title("📑 Generator Home Keeper v4")
 
 if st.session_state.step == 1:
     c1, c2 = st.columns(2)
     with c1: uploaded_word = st.file_uploader("1. Wgraj wzór Word (.docx)", type="docx")
     with c2: uploaded_imgs = st.file_uploader("2. Wgraj zdjęcia wizyty", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
 
-    if st.button("🔍 ANALIZUJ DOKUMENT I ZDJĘCIA"):
+    if st.button("🚀 ANALIZUJ I PRZYGOTUJ"):
         if uploaded_word and uploaded_imgs:
-            with st.spinner("AI analizuje szczegóły (liczniki, klucze, kody)..."):
+            with st.spinner("AI analizuje dokument..."):
                 t_tags, s_tags = get_tags(uploaded_word)
                 st.session_state.t_tags = t_tags
                 st.session_state.s_tags = s_tags
                 
-                b64_imgs = []
-                for f in uploaded_imgs:
-                    f.seek(0); b64_imgs.append(base64.b64encode(f.read()).decode('utf-8'))
+                b64_imgs = [resize_image(f) for f in uploaded_imgs]
                 
                 prompt = f"""
-                Jesteś ekspertem ds. protokołów nieruchomości. Przeanalizuj zdjęcia.
-                Wypełnij te pola: {t_tags}.
-                BARDZO WAŻNE WYTYCZNE:
-                - Liczniki: podaj dokładny stan cyfrowy.
-                - Klucze: wypisz ilość kompletów i każdy klucz osobno (np. piwnica, skrzynka, pilot szlaban).
-                - Kody: odczytaj kody do klatek i domofonów.
-                - Wyposażenie: lista mebli i sprzętów AGD.
-                Zwróć TYLKO czysty JSON: {{"tag": "wartosc"}}
+                Jesteś ekspertem ds. nieruchomości. Przeanalizuj zdjęcia.
+                Wypełnij te pola z dokumentu: {t_tags}.
+                Zwróć WYŁĄCZNIE czysty JSON: {{"tag": "wartość"}}. 
+                Nie dodawaj żadnego innego tekstu.
                 """
                 
-                res = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[{"role":"user","content":[{"type":"text","text":prompt},
-                    *[{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{i}"}} for i in b64_imgs[:10]]]}],
-                    response_format={"type": "json_object"}
-                )
-                
-                content = res.choices[0].message.content
-                if content:
-                    st.session_state.data = json.loads(content)
+                try:
+                    res = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[{"role":"user","content":[{"type":"text","text":prompt},
+                        *[{"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{i}"}} for i in b64_imgs[:10]]]}],
+                        response_format={"type": "json_object"}
+                    )
+                    
+                    st.session_state.data = json.loads(res.choices[0].message.content)
                     uploaded_word.seek(0); st.session_state.template_bytes = uploaded_word.read()
                     st.session_state.step = 2
                     st.rerun()
-                else:
-                    st.error("AI nie zwróciło danych. Spróbuj mniejszą ilość zdjęć.")
+                except Exception as e:
+                    st.error(f"Błąd: {e}")
 
-# --- 4. KROK 2: EDYCJA I PODPISY ---
 elif st.session_state.step == 2:
-    st.subheader("📝 Edytuj dane sczytane przez AI")
+    st.subheader("📝 Sprawdź i podpisz")
     
     final_text_map = {}
-    for tag in st.session_state.text_tags:
+    for tag in st.session_state.t_tags:
         val = st.session_state.data.get(tag, "")
         final_text_map[tag] = st.text_area(f"Pole: {tag}", value=val, height=100)
     
     st.divider()
     final_sig_map = {}
     if st.session_state.s_tags:
-        st.subheader("🖋️ Podpisy (każdy tag to osobne okienko)")
+        st.write("🖋️ Podpisy:")
         cols = st.columns(len(st.session_state.s_tags))
         for i, tag in enumerate(st.session_state.s_tags):
             with cols[i]:
-                st.write(f"Złóż podpis: **{tag}**")
-                final_sig_map[tag] = st_canvas(height=150, width=350, key=f"c_{tag}", background_color="#f0f0f0", display_toolbar=False)
+                st.write(f"Złóż podpis dla: **{tag}**")
+                final_sig_map[tag] = st_canvas(height=150, width=350, key=f"c_{tag}", background_color="#f5f5f5", display_toolbar=False)
 
-    if st.button("🖨️ GENERUJ FINALNY PLIK WORD"):
-        with st.spinner("Zapisywanie danych do Worda..."):
-            doc = Document(io.BytesIO(st.session_state.template_bytes))
-            process_word(doc, final_text_map, final_sig_map)
+    if st.button("🖨️ GENERUJ PLIK WORD"):
+        with st.spinner("Zastępowanie tagów i wstawianie podpisów..."):
+            final_doc = process_word_document(st.session_state.template_bytes, final_text_map, final_sig_map)
             
             out = io.BytesIO()
-            doc.save(out)
+            final_doc.save(out)
             st.success("✅ Gotowe!")
-            st.download_button("📥 POBIERZ RAPORT (.docx)", out.getvalue(), "raport_homekeeper.docx")
+            st.download_button("📥 POBIERZ RAPORT (.docx)", out.getvalue(), "raport_finalny.docx")
 
-    if st.button("⬅️ Wróć"):
+    if st.button("⬅️ Zacznij od nowa"):
         st.session_state.step = 1; st.rerun()
