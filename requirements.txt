@@ -1,0 +1,6 @@
+streamlit
+openai
+pymupdf
+streamlit-drawable-canvas
+Pillow
+opencv-python-headless
