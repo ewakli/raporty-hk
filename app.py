@@ -135,5 +135,3 @@ if st.session_state.extracted_data:
         st.session_state.extracted_data = None
         st.session_state.template_info = None
         st.rerun()
-            st.success("PDF gotowy!")
-            st.download_button("📥 Pobierz Raport", out.getvalue(), "raport_koncowy.pdf")
