@@ -5,3 +5,4 @@ streamlit-drawable-canvas
 Pillow
 opencv-python-headless
 streamlit-image-coordinates
+python-docx
