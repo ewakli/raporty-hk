@@ -112,30 +112,46 @@ if st.button("🚀 GENERUJ GOTOWY RAPORT PDF"):
                 data = json.loads(raw_content)
 
                 # 3. Modyfikacja PDF
-                # Plik wzor_home_keeper.pdf musi być w tym samym folderze na GitHub
                 doc = fitz.open("wzor_home_keeper.pdf")
                 page = doc[0]
 
-                # Nanoszenie danych (Współrzędne dostosowane do Twojego wzoru)
-                page.insert_text((120, 85), str(data.get('data', '')), fontsize=11, color=(0, 0, 0.5))
-                page.insert_text((70, 280), str(data.get('wyposażenie', '')), fontsize=9, color=(0, 0, 0))
-                page.insert_text((100, 525), str(data.get('stan_licznik_energia', '')), fontsize=11, color=(0, 0, 0))
-                page.insert_text((70, 420), str(data.get('uwagi_techniczne', '')), fontsize=9, color=(0, 0, 0))
-                page.insert_text((70, 630), str(data.get('klucze', '')), fontsize=9, color=(0, 0, 0))
+                # Funkcja pomocnicza do czyszczenia tekstu (usuwa nawiasy i cudzysłowy)
+                def clean_text(text):
+                    if isinstance(text, list):
+                        return ", ".join(text)
+                    return str(text).replace("[", "").replace("]", "").replace("'", "")
 
-                # 4. Wstawianie podpisów (zgodnie ze wzorem na dole strony)
+                # NANOSZENIE DANYCH (Poprawione współrzędne na podstawie Twojego wyniku)
+                # Format: (X, Y) - im większe Y, tym niżej. Im większe X, tym bardziej w prawo.
+                
+                # Data (Linia: W dniu... roku)
+                page.insert_text((115, 102), clean_text(data.get('data', '')), fontsize=11, color=(0, 0, 0.6))
+                
+                # Wyposażenie (Punkt 1) - zaczynamy wyżej i czyścimy tekst
+                page.insert_text((70, 312), clean_text(data.get('wyposażenie', '')), fontsize=9, color=(0, 0, 0))
+                
+                # Uwagi techniczne (Punkt 2) - przesunięte wyżej
+                page.insert_text((70, 445), clean_text(data.get('uwagi_techniczne', '')), fontsize=9, color=(0, 0, 0))
+                
+                # Licznik ENERGA (Sekcja Stan Liczników) - przesunięty znacznie wyżej
+                page.insert_text((110, 545), clean_text(data.get('stan_licznik_energia', '')), fontsize=11, color=(0, 0, 0))
+                
+                # Klucze (Sekcja kluczy) - przesunięte wyżej na kropki
+                page.insert_text((120, 655), clean_text(data.get('klucze', '')), fontsize=9, color=(0, 0, 0))
+
+                # 4. Wstawianie podpisów (Przesunięte wyżej, żeby leżały na kropkach)
                 if sig_najemca.image_data is not None and sig_pracownik.image_data is not None:
-                    # Podpis Najemcy (Lewo)
+                    # Podpis Najemcy (Lewo) - Rect(lewo, góra, prawo, dół)
                     img_n = Image.fromarray(sig_najemca.image_data.astype('uint8'), 'RGBA')
                     buf_n = io.BytesIO()
                     img_n.save(buf_n, format="PNG")
-                    page.insert_image(fitz.Rect(70, 780, 220, 830), stream=buf_n.getvalue())
+                    page.insert_image(fitz.Rect(70, 810, 220, 880), stream=buf_n.getvalue())
 
                     # Podpis Pracownika (Prawo)
                     img_p = Image.fromarray(sig_pracownik.image_data.astype('uint8'), 'RGBA')
                     buf_p = io.BytesIO()
                     img_p.save(buf_p, format="PNG")
-                    page.insert_image(fitz.Rect(370, 780, 520, 830), stream=buf_p.getvalue())
+                    page.insert_image(fitz.Rect(370, 810, 520, 880), stream=buf_p.getvalue())
 
                 # 5. Export pliku
                 pdf_output = io.BytesIO()
